@@ -1,60 +1,91 @@
 package main
-/* We import 4 important libraries
-1. “net/http” to access the core go http functionality
-2. “fmt” for formatting our text
-3. “html/template” a library that allows us to interact with our html file.
-4. "time" - a library for working with date and time. */
+
 import (
-   "net/http"
-   "fmt"
-   "time"
-   "html/template"
+	"io/ioutil"
+	"log"
+	"net/http"
+  "html/template"
+  "regexp"
+  "errors"
 )
 
-//Create a struct that holds information to be displayed in our HTML file
-type Welcome struct {
-   Name string
-   Time string
+type Page struct {
+	Title string
+	Body  []byte
 }
 
-//Go application entrypoint
+var templates = template.Must(template.ParseFiles("welcome-template.html"))
+var validPath = regexp.MustCompile("^/(edit|save|view)/([a-zA-Z0-9]+)$")
+
+func (p *Page) save() error {
+	filename := p.Title + ".txt"
+	return ioutil.WriteFile(filename, p.Body, 0600)
+}
+
+func loadPage(title string) (*Page, error) {
+	filename := title + ".txt"
+	body, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+	return &Page{Title: title, Body: body}, nil
+}
+
+func viewHandler(w http.ResponseWriter, r *http.Request, title string) {
+    p, err := loadPage(title)
+    if err != nil {
+        http.Redirect(w, r, "/edit/"+title, http.StatusFound)
+        return
+    }
+    renderTemplate(w, "view", p)
+}
+func editHandler(w http.ResponseWriter, r *http.Request, title string) {
+    p, err := loadPage(title)
+    if err != nil {
+        p = &Page{Title: title}
+    }
+    renderTemplate(w, "edit", p)
+}
+func saveHandler(w http.ResponseWriter, r *http.Request, title string) {
+    body := r.FormValue("body")
+    p := &Page{Title: title, Body: []byte(body)}
+    err := p.save()
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+    http.Redirect(w, r, "/view/"+title, http.StatusFound)
+}
+
+func makeHandler(fn func (http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
+  return func(w http.ResponseWriter, r *http.Request){
+    m := validPath.FindStringSubmatch(r.URL.Path)
+    if m == nil {
+      http.NotFound(w, r)
+      return
+    }
+    fn(w, r, m[2])
+  }
+}
+
+func renderTemplate(w http.ResponseWriter, tmpl string, p *Page) {
+    err := templates.ExecuteTemplate(w, tmpl+".html", p)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+    }
+}
+
+func getTitle(w http.ResponseWriter, r *http.Request) (string, error) {
+    m := validPath.FindStringSubmatch(r.URL.Path)
+    if m == nil {
+        http.NotFound(w, r)
+        return "", errors.New("Invalid Page Title")
+    }
+    return m[2], nil
+}
+
 func main() {
-   //Instantiate a Welcome struct object and pass in some random information.
-   //We shall get the name of the user as a query parameter from the URL
-   welcome := Welcome{"Anonymous", time.Now().Format(time.Stamp)}
-
-   //We tell Go exactly where we can find our html file. We ask Go to parse the html file (Notice
-   // the relative path). We wrap it in a call to template.Must() which handles any errors and halts if there are fatal errors
-
-   templates := template.Must(template.ParseFiles("templates/welcome-template.html"))
-
-   //Our HTML comes with CSS that go needs to provide when we run the app. Here we tell go to create
-   // a handle that looks in the static directory, go then uses the "/static/" as a url that our
-   //html can refer to when looking for our css and other files.
-
-   http.Handle("/static/", //final url can be anything
-      http.StripPrefix("/static/",
-         http.FileServer(http.Dir("static")))) //Go looks in the relative "static" directory first using http.FileServer(), then matches it to a
-         //url of our choice as shown in http.Handle("/static/"). This url is what we need when referencing our css files
-         //once the server begins. Our html code would therefore be <link rel="stylesheet"  href="/static/stylesheet/...">
-         //It is important to note the url in http.Handle can be whatever we like, so long as we are consistent.
-
-   //This method takes in the URL path "/" and a function that takes in a response writer, and a http request.
-   http.HandleFunc("/" , func(w http.ResponseWriter, r *http.Request) {
-
-      //Takes the name from the URL query e.g ?name=Martin, will set welcome.Name = Martin.
-      if name := r.FormValue("name"); name != "" {
-         welcome.Name = name;
-      }
-      //If errors show an internal server error message
-      //I also pass the welcome struct to the welcome-template.html file.
-      if err := templates.ExecuteTemplate(w, "welcome-template.html", welcome); err != nil {
-         http.Error(w, err.Error(), http.StatusInternalServerError)
-      }
-   })
-
-   //Start the web server, set the port to listen to 8080. Without a path it assumes localhost
-   //Print any errors from starting the webserver using fmt
-   fmt.Println("Listening");
-   fmt.Println(http.ListenAndServe("", nil));
-}
+	http.HandleFunc("/view/", makeHandler(viewHandler))
+  http.HandleFunc("/edit/", makeHandler(editHandler))
+  http.HandleFunc("/save/", makeHandler(saveHandler))
+	log.Fatal(http.ListenAndServe("", nil))
